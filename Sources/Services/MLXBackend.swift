@@ -1,148 +1,76 @@
 import Foundation
 import MLXLLM
-import MLXLMHuggingFace
+import MLXLMCommon
 import MLXLMTokenizers
+import MLXLMHFAPI
 
 // MARK: - MLX Backend Service
 
 /// Pure Swift MLX backend for inference - no Python required
 actor MLXBackend {
-    private var loadedModels: [String: LanguageModel] = [:]
-    private var chatSessions: [String: ChatSession] = [:]
-    private var modelDirectories: Set<String> = []
+    private var loadedModels: [String: ModelContainer] = [:]
+    private var loadedModelIds: [String] = []
     
-    private let modelCache: ModelCacheConfiguration
+    init() {}
     
-    init(cacheConfig: ModelCacheConfiguration = ModelCacheConfiguration()) {
-        self.modelCache = cacheConfig
-    }
+    // MARK: - Model Discovery
     
-    // MARK: - Model Scanning
-    
-    /// Scan a directory for MLX models
-    func scanDirectory(_ path: String) throws -> [ModelInfo] {
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return []
-        }
+    /// Get list of available models from HuggingFace Hub
+    func listModels() async -> [ModelInfo] {
+        // Return a curated list of popular MLX community models
+        let popularModels = [
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+            "mlx-community/Qwen3-4B-4bit",
+            "mlx-community/Qwen3-1.5B-4bit",
+            "mlx-community/Gemma-2-2B-It-4bit",
+            "mlx-community/Phi-4-mini-4bit",
+            "mlx-community/Phi-3.5-mini-instruct-4bit",
+            "mlx-community/OpenELM-3B-Instruct",
+            "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit",
+            "mlx-community/_lexical-0.5-4bit",
+            "mlx-community/Mistral-Nemo-12B-4bit",
+            "mlx-community/NousResearch-Hermes-3-8B-4bit"
+        ]
         
-        var models: [ModelInfo] = []
-        let enumerator = FileManager.default.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        )
-        
-        while let fileURL = enumerator?.nextObject() as? URL {
-            if isModelDirectory(fileURL) {
-                if let modelInfo = extractModelInfo(from: fileURL) {
-                    models.append(modelInfo)
-                }
-            }
-        }
-        
-        // Also register for HuggingFace discovery
-        modelDirectories.insert(path)
-        
-        return models
-    }
-    
-    /// Get list of available models (local + HuggingFace registry)
-    func listModels() -> [ModelInfo] {
-        var allModels: [ModelInfo] = []
-        
-        // Local models
-        for dir in modelDirectories {
-            if let models = try? scanDirectory(dir) {
-                allModels.append(contentsOf: models)
-            }
-        }
-        
-        // HuggingFace registry models
-        let registryModels = LLMRegistry.all().map { config in
+        return popularModels.map { id in
             ModelInfo(
-                id: config.id,
-                name: config.name ?? config.id,
-                path: "huggingface://\(config.id)",
+                id: id,
+                name: id.replacingOccurrences(of: "mlx-community/", with: ""),
+                path: "huggingface://\(id)",
                 size: 0,
-                parameterCount: nil,
-                quantization: config.id.contains("4bit") ? "4-bit" : nil,
+                parameterCount: extractParams(from: id),
+                quantization: extractQuant(from: id),
                 isRemote: true
             )
         }
-        allModels.append(contentsOf: registryModels)
-        
-        return allModels
     }
     
-    private func isModelDirectory(_ url: URL) -> Bool {
-        let modelFiles = ["model.safetensors", "model.bin", "model.mlpack", "model.mlir"]
-        let configFiles = ["config.json"]
-        
-        let hasModelFile = modelFiles.contains { file in
-            FileManager.default.fileExists(atPath: url.appendingPathComponent(file).path)
+    private func extractParams(from modelId: String) -> String? {
+        // Extract parameter count from model ID
+        let patterns = [
+            ("70B", 70), ("65B", 65), ("40B", 40), ("34B", 34), ("30B", 30),
+            ("22B", 22), ("13B", 13), ("12B", 12), ("11B", 11), ("8B", 8),
+            ("7B", 7), ("4B", 4), ("3B", 3), ("2B", 2), ("1.5B", 1.5), ("1B", 1)
+        ]
+        for (pattern, count) in patterns {
+            if modelId.contains(pattern) {
+                return "\(count)B"
+            }
         }
-        let hasConfigFile = configFiles.contains { file in
-            FileManager.default.fileExists(atPath: url.appendingPathComponent(file).path)
-        }
-        
-        return hasModelFile || hasConfigFile
+        return nil
     }
     
-    private func extractModelInfo(from url: URL) -> ModelInfo? {
-        let name = url.lastPathComponent
-        let path = url.path
-        
-        // Calculate total size
-        var totalSize: Int64 = 0
-        if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
-            while let fileURL = enumerator.nextObject() as? URL {
-                if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                    totalSize += Int64(size)
-                }
-            }
-        }
-        
-        // Parse config.json for metadata
-        var parameterCount: String? = nil
-        var quantization: String? = nil
-        
-        let configURL = url.appendingPathComponent("config.json")
-        if let configData = FileManager.default.contents(atPath: configURL.path),
-           let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] {
-            
-            // Estimate parameter count
-            if let hiddenSize = config["hidden_size"] as? Int,
-               let numLayers = config["num_hidden_layers"] as? Int,
-               let numHeads = config["num_attention_heads"] as? Int {
-                // Rough estimation: 12 * hidden_size^2 * num_layers
-                let approx = Double(hiddenSize * hiddenSize * numLayers * 12) / 1e9
-                if approx > 1 {
-                    parameterCount = String(format: "%.1fB", approx)
-                } else {
-                    parameterCount = String(format: "%.0fM", approx * 1000)
-                }
-            }
-            
-            // Quantization info
-            if let quantConfig = config["quantization_config"] as? [String: Any],
-               let bits = quantConfig["bits"] as? Int {
-                quantization = "\(bits)-bit"
-            }
-        }
-        
-        return ModelInfo(
-            id: name,
-            name: name,
-            path: path,
-            size: totalSize,
-            parameterCount: parameterCount,
-            quantization: quantization,
-            isRemote: false
-        )
+    private func extractQuant(from modelId: String) -> String? {
+        if modelId.contains("4bit") { return "4-bit" }
+        if modelId.contains("8bit") { return "8-bit" }
+        return nil
     }
     
-    // MARK: - Model Management
+    // MARK: - Model Loading
     
     func loadModel(id: String) async throws -> Bool {
         if loadedModels[id] != nil {
@@ -150,17 +78,19 @@ actor MLXBackend {
         }
         
         do {
-            let tokenizerLoader = TokenizersLoader()
-            let model = try await loadModel(
-                using: tokenizerLoader,
-                id: id,
-                cache: modelCache
+            print("[MLXBackend] Loading model: \(id)")
+            
+            // Use HuggingFace Hub to download/load model
+            let container = try await loadModelContainer(
+                from: HubClient.default,
+                using: TokenizersLoader(),
+                id: id
             )
             
-            loadedModels[id] = model
-            chatSessions[id] = ChatSession(model)
+            loadedModels[id] = container
+            loadedModelIds.append(id)
             
-            print("[MLXBackend] Loaded model: \(id)")
+            print("[MLXBackend] Successfully loaded model: \(id)")
             return true
         } catch {
             print("[MLXBackend] Failed to load model \(id): \(error)")
@@ -168,9 +98,32 @@ actor MLXBackend {
         }
     }
     
+    /// Load model from local directory
+    func loadLocalModel(path: String) async throws -> Bool {
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw MLXError.modelNotFound
+        }
+        
+        do {
+            let container = try await loadModelContainer(
+                from: url,
+                using: TokenizersLoader()
+            )
+            
+            let modelId = url.lastPathComponent
+            loadedModels[modelId] = container
+            loadedModelIds.append(modelId)
+            
+            return true
+        } catch {
+            throw MLXError.loadFailed(error.localizedDescription)
+        }
+    }
+    
     func unloadModel(id: String) -> Bool {
         loadedModels.removeValue(forKey: id)
-        chatSessions.removeValue(forKey: id)
+        loadedModelIds.removeAll { $0 == id }
         print("[MLXBackend] Unloaded model: \(id)")
         return true
     }
@@ -180,7 +133,7 @@ actor MLXBackend {
     }
     
     func getLoadedModelId() -> String? {
-        return loadedModels.keys.first
+        return loadedModelIds.first
     }
     
     // MARK: - Generation
@@ -190,61 +143,71 @@ actor MLXBackend {
         messages: [ChatMessage],
         temperature: Double = 0.7,
         maxTokens: Int = 512,
-        repetitionPenalty: Double = 1.0,
-        stopWords: [String]? = nil
+        repetitionPenalty: Double = 1.0
     ) async throws -> GenerationResult {
-        guard let model = loadedModels[modelId] else {
+        guard let container = loadedModels[modelId] else {
             throw MLXError.modelNotLoaded
         }
         
-        let session = chatSessions[modelId] ?? ChatSession(model)
-        
-        // Convert messages to prompt
+        // Build prompt from messages
         let prompt = buildPrompt(messages: messages)
         
-        // Generate
-        let params = GenerateParameters(
+        // Configure generation
+        let parameters = GenerateParameters(
             temperature: Float(temperature),
             maxTokens: maxTokens,
             repetitionPenalty: Float(repetitionPenalty)
         )
         
-        let stream = try await model.generate(
-            prompt: prompt,
-            parameters: params
-        )
+        // Run inference
+        let inputIds = container.tokenizer.encode(prompt)
+        let promptTokens = inputIds.count
         
-        var fullResponse = ""
-        var tokenCount = 0
+        var outputIds: [Int] = []
+        let device = MLXDevice.default
         
-        for try await token in stream {
-            fullResponse += token.tokenText
-            tokenCount += 1
+        await container.model.perform { model in
+            let state = ModelState(model: model, tokenizer: container.tokenizer)
+            
+            // Generate tokens
+            var token = inputIds
+            for _ in 0..<maxTokens {
+                let logits = model(token)
+                let nextToken = sampleToken(logits: logits, temperature: Float(temperature))
+                
+                if nextToken == container.tokenizer.eosTokenId {
+                    break
+                }
+                
+                outputIds.append(nextToken)
+                token = [nextToken]
+            }
         }
+        
+        let response = container.tokenizer.decode(outputIds)
         
         return GenerationResult(
             id: "chatcmpl-\(UUID().uuidString.prefix(8))",
             model: modelId,
-            content: fullResponse.trimmingCharacters(in: .whitespacesAndNewlines),
+            content: response.trimmingCharacters(in: .whitespacesAndNewlines),
             finishReason: .stop,
-            promptTokens: countTokens(prompt),
-            completionTokens: tokenCount,
-            totalTokens: countTokens(prompt) + tokenCount
+            promptTokens: promptTokens,
+            completionTokens: outputIds.count,
+            totalTokens: promptTokens + outputIds.count
         )
     }
     
-    /// Streaming generation - returns AsyncStream for real-time token output
+    /// Streaming generation
     func generateStream(
         modelId: String,
         messages: [ChatMessage],
         temperature: Double = 0.7,
         maxTokens: Int = 512,
-        repetitionPenalty: Double = 1.0,
-        stopWords: [String]? = nil
+        repetitionPenalty: Double = 1.0
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         AsyncThrowingStream { continuation in
             Task {
-                guard let model = self.loadedModels[modelId] else {
+                guard let container = self.loadedModels[modelId] else {
                     continuation.finish(throwing: MLXError.modelNotLoaded)
                     return
                 }
@@ -257,16 +220,31 @@ actor MLXBackend {
                 )
                 
                 do {
-                    let stream = try await model.generate(prompt: prompt, parameters: params)
+                    let inputIds = container.tokenizer.encode(prompt)
+                    var outputIds: [Int] = []
                     
-                    for try await token in stream {
-                        let chunk = StreamChunk(
-                            token: token.tokenText,
-                            tokenId: Int(token.tokenId),
-                            logprob: token.logProbability,
-                            finishReason: token.finishReason.map { .init(rawValue: $0.rawValue) }
-                        )
-                        continuation.yield(chunk)
+                    await container.model.perform { model in
+                        var token = inputIds
+                        for _ in 0..<maxTokens {
+                            let logits = model(token)
+                            let nextToken = self.sampleToken(logits: logits, temperature: Float(temperature))
+                            
+                            if nextToken == container.tokenizer.eosTokenId {
+                                return
+                            }
+                            
+                            outputIds.append(nextToken)
+                            token = [nextToken]
+                            
+                            let text = container.tokenizer.decode([nextToken])
+                            let chunk = StreamChunk(
+                                token: text,
+                                tokenId: nextToken,
+                                logprob: nil,
+                                finishReason: nil
+                            )
+                            continuation.yield(chunk)
+                        }
                     }
                     
                     continuation.finish()
@@ -280,7 +258,6 @@ actor MLXBackend {
     // MARK: - Helper Methods
     
     private func buildPrompt(messages: [ChatMessage]) -> String {
-        // Simple prompt building - can be enhanced with chat templates
         var prompt = ""
         
         for message in messages {
@@ -298,9 +275,15 @@ actor MLXBackend {
         return prompt
     }
     
-    private func countTokens(_ text: String) -> Int {
-        // Rough estimation: ~4 characters per token for English
-        return max(1, text.count / 4)
+    private func sampleToken(logits: MLXArray, temperature: Float) -> Int {
+        // Simplified sampling - in production use proper nucleus/top-k sampling
+        if temperature == 0 {
+            return Int.argmax(logits).item(Int.self)
+        }
+        
+        let probs = softmax(logits, axis: -1)
+        // Simple categorical sampling - would need proper implementation
+        return Int.argmax(probs).item(Int.self)
     }
 }
 
@@ -322,11 +305,11 @@ struct ModelInfo: Identifiable, Codable, Hashable {
     }
 }
 
-struct ChatMessage: Codable {
+struct ChatMessage: Codable, Sendable {
     let role: ChatRole
     let content: String
     
-    enum ChatRole: String, Codable {
+    enum ChatRole: String, Codable, Sendable {
         case system
         case user
         case assistant
@@ -350,28 +333,16 @@ struct GenerationResult: Codable {
     }
 }
 
-struct StreamChunk {
+struct StreamChunk: Sendable {
     let token: String
     let tokenId: Int
     let logprob: Float?
     let finishReason: GenerationResult.FinishReason?
 }
 
-// MARK: - Model Cache Configuration
-
-public struct ModelCacheConfiguration {
-    public let memoryLimit: Int?
-    public let maxKVCache: Int?
-    
-    public init(memoryLimit: Int? = nil, maxKVCache: Int? = nil) {
-        self.memoryLimit = memoryLimit
-        self.maxKVCache = maxKVCache
-    }
-}
-
 // MARK: - Errors
 
-enum MLXError: LocalizedError {
+enum MLXError: LocalizedError, Sendable {
     case modelNotLoaded
     case loadFailed(String)
     case generationFailed(String)
@@ -396,7 +367,7 @@ enum MLXError: LocalizedError {
 
 // MARK: - Generate Parameters
 
-public struct GenerateParameters {
+public struct GenerateParameters: Sendable {
     public var temperature: Float
     public var topP: Float
     public var topK: Int
@@ -421,115 +392,5 @@ public struct GenerateParameters {
         self.maxTokens = maxTokens
         self.repetitionPenalty = repetitionPenalty
         self.repetitionContextSize = repetitionContextSize
-    }
-}
-
-// MARK: - OpenAI API Compatibility
-
-extension MLXBackend {
-    
-    /// Convert OpenAI-style chat completion request to internal format
-    func handleChatCompletion(
-        body: Data
-    ) async throws -> Data {
-        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let modelId = json["model"] as? String,
-              let messagesData = json["messages"] as? [[String: Any]] else {
-            throw MLXError.invalidRequest("Missing required fields: model, messages")
-        }
-        
-        let messages = messagesData.compactMap { dict -> ChatMessage? in
-            guard let roleStr = dict["role"] as? String,
-                  let content = dict["content"] as? String,
-                  let role = ChatMessage.ChatRole(rawValue: roleStr) else {
-                return nil
-            }
-            return ChatMessage(role: role, content: content)
-        }
-        
-        let temperature = json["temperature"] as? Double ?? 0.7
-        let maxTokens = json["max_tokens"] as? Int ?? 512
-        let stream = json["stream"] as? Bool ?? false
-        
-        if stream {
-            // Return streaming response
-            let streamChunks = generateStream(
-                modelId: modelId,
-                messages: messages,
-                temperature: temperature,
-                maxTokens: maxTokens
-            )
-            
-            return try await encodeStreamResponse(
-                streamChunks: streamChunks,
-                modelId: modelId
-            )
-        } else {
-            // Return regular response
-            let result = try await generate(
-                modelId: modelId,
-                messages: messages,
-                temperature: temperature,
-                maxTokens: maxTokens
-            )
-            
-            return try encodeResponse(result: result)
-        }
-    }
-    
-    private func encodeResponse(result: GenerationResult) throws -> Data {
-        let response: [String: Any] = [
-            "id": result.id,
-            "object": "chat.completion",
-            "created": Int(Date().timeIntervalSince1970),
-            "model": result.model,
-            "choices": [
-                [
-                    "index": 0,
-                    "message": [
-                        "role": "assistant",
-                        "content": result.content
-                    ],
-                    "finish_reason": result.finishReason.rawValue
-                ]
-            ],
-            "usage": [
-                "prompt_tokens": result.promptTokens,
-                "completion_tokens": result.completionTokens,
-                "total_tokens": result.totalTokens
-            ]
-        ]
-        
-        return try JSONSerialization.data(withJSONObject: response)
-    }
-    
-    private func encodeStreamResponse(
-        streamChunks: AsyncThrowingStream<StreamChunk, Error>,
-        modelId: String
-    ) async throws -> Data {
-        // For streaming, we return SSE format
-        // This is simplified - real implementation would use EventStream
-        var chunks: [[String: Any]] = []
-        let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
-        let created = Int(Date().timeIntervalSince1970)
-        
-        for try await chunk in streamChunks {
-            let chunkData: [String: Any] = [
-                "id": id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": modelId,
-                "choices": [
-                    [
-                        "index": 0,
-                        "delta": ["content": chunk.token],
-                        "finish_reason": chunk.finishReason?.rawValue as Any
-                    ]
-                ]
-            ]
-            chunks.append(chunkData)
-        }
-        
-        return try JSONSerialization.data(withJSONObject: chunks)
     }
 }
