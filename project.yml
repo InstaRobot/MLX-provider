@@ -17,7 +17,7 @@ settings:
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
-    INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2024 InstaRobot. All rights reserved."
+    INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2024 InstaRobot"
     INFOPLIST_KEY_CFBundleDisplayName: "MLX Provider"
     SWIFT_STRICT_CONCURRENCY: complete
 
@@ -28,11 +28,8 @@ packages:
   MLXLM:
     url: https://github.com/ml-explore/mlx-swift-lm
     branch: "main"
-  swift-tokenizers:
+  Tokenizers:
     url: https://github.com/DePasqualeOrg/swift-tokenizers
-    branch: "main"
-  swift-nio:
-    url: https://github.com/apple/swift-nio
     branch: "main"
 
 targets:
@@ -51,12 +48,8 @@ targets:
         product: MLXLLM
       - package: MLXLM
         product: MLXLMCommon
-      - package: swift-tokenizers
+      - package: Tokenizers
         product: Tokenizers
-      - package: swift-nio
-        product: NIO
-      - package: swift-nio
-        product: NIOHTTP1
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.instarobot.MLX-provider
@@ -78,7 +71,7 @@ targets:
         CFBundleExecutable: "$(EXECUTABLE_NAME)"
         LSMinimumSystemVersion: "15.0"
         LSApplicationCategoryType: "public.app-category.developer-tools"
-        NSHumanReadableCopyright: "Copyright © 2024 InstaRobot. All rights reserved."
+        NSHumanReadableCopyright: "Copyright © 2024 InstaRobot"
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
         LSUIElement: false
