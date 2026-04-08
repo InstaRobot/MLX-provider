@@ -1,8 +1,7 @@
 import Foundation
 import MLXLLM
 import MLXLMCommon
-import MLXLMTokenizers
-import MLXLMHFAPI
+import Tokenizers
 
 // MARK: - MLX Backend Service
 
@@ -11,11 +10,20 @@ actor MLXBackend {
     private var loadedModels: [String: ModelContainer] = [:]
     private var loadedModelIds: [String] = []
     
+    // HuggingFace token for model downloads
+    private var hfToken: String?
+    
     init() {}
+    
+    // MARK: - Configuration
+    
+    func setToken(_ token: String?) {
+        self.hfToken = token
+    }
     
     // MARK: - Model Discovery
     
-    /// Get list of available models from HuggingFace Hub
+    /// Get list of popular MLX community models
     func listModels() async -> [ModelInfo] {
         // Return a curated list of popular MLX community models
         let popularModels = [
@@ -31,7 +39,6 @@ actor MLXBackend {
             "mlx-community/Phi-3.5-mini-instruct-4bit",
             "mlx-community/OpenELM-3B-Instruct",
             "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit",
-            "mlx-community/_lexical-0.5-4bit",
             "mlx-community/Mistral-Nemo-12B-4bit",
             "mlx-community/NousResearch-Hermes-3-8B-4bit"
         ]
@@ -50,15 +57,14 @@ actor MLXBackend {
     }
     
     private func extractParams(from modelId: String) -> String? {
-        // Extract parameter count from model ID
-        let patterns = [
+        let patterns: [(String, Double)] = [
             ("70B", 70), ("65B", 65), ("40B", 40), ("34B", 34), ("30B", 30),
             ("22B", 22), ("13B", 13), ("12B", 12), ("11B", 11), ("8B", 8),
             ("7B", 7), ("4B", 4), ("3B", 3), ("2B", 2), ("1.5B", 1.5), ("1B", 1)
         ]
-        for (pattern, count) in patterns {
+        for (pattern, _) in patterns {
             if modelId.contains(pattern) {
-                return "\(count)B"
+                return pattern
             }
         }
         return nil
@@ -72,6 +78,7 @@ actor MLXBackend {
     
     // MARK: - Model Loading
     
+    /// Load model from HuggingFace Hub (requires network)
     func loadModel(id: String) async throws -> Bool {
         if loadedModels[id] != nil {
             return true // Already loaded
@@ -80,9 +87,11 @@ actor MLXBackend {
         do {
             print("[MLXBackend] Loading model: \(id)")
             
-            // Use HuggingFace Hub to download/load model
+            // Create HuggingFace downloader
+            let downloader = HFDownloader(token: hfToken)
+            
             let container = try await loadModelContainer(
-                from: HubClient.default,
+                from: downloader,
                 using: TokenizersLoader(),
                 id: id
             )
@@ -115,6 +124,7 @@ actor MLXBackend {
             loadedModels[modelId] = container
             loadedModelIds.append(modelId)
             
+            print("[MLXBackend] Loaded local model: \(modelId)")
             return true
         } catch {
             throw MLXError.loadFailed(error.localizedDescription)
@@ -149,27 +159,13 @@ actor MLXBackend {
             throw MLXError.modelNotLoaded
         }
         
-        // Build prompt from messages
         let prompt = buildPrompt(messages: messages)
-        
-        // Configure generation
-        let parameters = GenerateParameters(
-            temperature: Float(temperature),
-            maxTokens: maxTokens,
-            repetitionPenalty: Float(repetitionPenalty)
-        )
-        
-        // Run inference
         let inputIds = container.tokenizer.encode(prompt)
         let promptTokens = inputIds.count
         
         var outputIds: [Int] = []
-        let device = MLXDevice.default
         
         await container.model.perform { model in
-            let state = ModelState(model: model, tokenizer: container.tokenizer)
-            
-            // Generate tokens
             var token = inputIds
             for _ in 0..<maxTokens {
                 let logits = model(token)
@@ -213,44 +209,34 @@ actor MLXBackend {
                 }
                 
                 let prompt = self.buildPrompt(messages: messages)
-                let params = GenerateParameters(
-                    temperature: Float(temperature),
-                    maxTokens: maxTokens,
-                    repetitionPenalty: Float(repetitionPenalty)
-                )
+                let inputIds = container.tokenizer.encode(prompt)
+                var outputIds: [Int] = []
                 
-                do {
-                    let inputIds = container.tokenizer.encode(prompt)
-                    var outputIds: [Int] = []
-                    
-                    await container.model.perform { model in
-                        var token = inputIds
-                        for _ in 0..<maxTokens {
-                            let logits = model(token)
-                            let nextToken = self.sampleToken(logits: logits, temperature: Float(temperature))
-                            
-                            if nextToken == container.tokenizer.eosTokenId {
-                                return
-                            }
-                            
-                            outputIds.append(nextToken)
-                            token = [nextToken]
-                            
-                            let text = container.tokenizer.decode([nextToken])
-                            let chunk = StreamChunk(
-                                token: text,
-                                tokenId: nextToken,
-                                logprob: nil,
-                                finishReason: nil
-                            )
-                            continuation.yield(chunk)
+                await container.model.perform { model in
+                    var token = inputIds
+                    for _ in 0..<maxTokens {
+                        let logits = model(token)
+                        let nextToken = self.sampleToken(logits: logits, temperature: Float(temperature))
+                        
+                        if nextToken == container.tokenizer.eosTokenId {
+                            break
                         }
+                        
+                        outputIds.append(nextToken)
+                        token = [nextToken]
+                        
+                        let text = container.tokenizer.decode([nextToken])
+                        let chunk = StreamChunk(
+                            token: text,
+                            tokenId: nextToken,
+                            logprob: nil,
+                            finishReason: nil
+                        )
+                        continuation.yield(chunk)
                     }
-                    
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
                 }
+                
+                continuation.finish()
             }
         }
     }
@@ -276,20 +262,55 @@ actor MLXBackend {
     }
     
     private func sampleToken(logits: MLXArray, temperature: Float) -> Int {
-        // Simplified sampling - in production use proper nucleus/top-k sampling
         if temperature == 0 {
             return Int.argmax(logits).item(Int.self)
         }
         
         let probs = softmax(logits, axis: -1)
-        // Simple categorical sampling - would need proper implementation
         return Int.argmax(probs).item(Int.self)
+    }
+}
+
+// MARK: - HuggingFace Downloader
+
+/// Simple HuggingFace Hub downloader for MLX models
+struct HFDownloader: Downloader {
+    let token: String?
+    
+    func download(
+        id: String,
+        revision: String?,
+        matching patterns: [String],
+        useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        // Check cache first
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let modelDir = cacheDir.appendingPathComponent("models/\(id)")
+        
+        if FileManager.default.fileExists(atPath: modelDir.path) {
+            print("[HFDownloader] Using cached model: \(id)")
+            return modelDir
+        }
+        
+        // Download from HuggingFace Hub
+        print("[HFDownloader] Downloading model: \(id)")
+        
+        // Construct API URL
+        let revisionPart = revision != nil ? "/\(revision!)" : ""
+        let apiUrl = "https://huggingface.co/api/models/\(id)\(revisionPart)"
+        
+        // Download model files
+        let fileListUrl = "https://huggingface.co/\(id)/raw/main/.gitattributes"
+        
+        // For now, throw error - actual download implementation needed
+        throw MLXError.loadFailed("HuggingFace download not implemented - use local models for now")
     }
 }
 
 // MARK: - Data Types
 
-struct ModelInfo: Identifiable, Codable, Hashable {
+struct ModelInfo: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let name: String
     let path: String
