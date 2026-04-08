@@ -5,145 +5,162 @@ import Tokenizers
 
 // MARK: - MLX Backend Service
 
-/// Pure Swift MLX backend for inference - no Python required
+/// Pure Swift MLX backend for local inference - no Python required
 actor MLXBackend {
-    private var loadedModels: [String: ModelContainer] = [:]
-    private var loadedModelIds: [String] = []
-    
-    // HuggingFace token for model downloads
-    private var hfToken: String?
+    private var loadedModel: ModelContainer?
+    private var loadedModelId: String?
     
     init() {}
     
-    // MARK: - Configuration
-    
-    func setToken(_ token: String?) {
-        self.hfToken = token
-    }
-    
     // MARK: - Model Discovery
     
-    /// Get list of popular MLX community models
-    func listModels() async -> [ModelInfo] {
-        // Return a curated list of popular MLX community models
-        let popularModels = [
-            "mlx-community/Llama-3.2-3B-Instruct-4bit",
-            "mlx-community/Llama-3.2-1B-Instruct-4bit",
-            "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
-            "mlx-community/Qwen2.5-7B-Instruct-4bit",
-            "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-            "mlx-community/Qwen3-4B-4bit",
-            "mlx-community/Qwen3-1.5B-4bit",
-            "mlx-community/Gemma-2-2B-It-4bit",
-            "mlx-community/Phi-4-mini-4bit",
-            "mlx-community/Phi-3.5-mini-instruct-4bit",
-            "mlx-community/OpenELM-3B-Instruct",
-            "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit",
-            "mlx-community/Mistral-Nemo-12B-4bit",
-            "mlx-community/NousResearch-Hermes-3-8B-4bit"
-        ]
-        
-        return popularModels.map { id in
-            ModelInfo(
-                id: id,
-                name: id.replacingOccurrences(of: "mlx-community/", with: ""),
-                path: "huggingface://\(id)",
-                size: 0,
-                parameterCount: extractParams(from: id),
-                quantization: extractQuant(from: id),
-                isRemote: true
-            )
+    /// Scan directory for local MLX models
+    func scanDirectory(_ path: String) async throws -> [ModelInfo] {
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return []
         }
-    }
-    
-    private func extractParams(from modelId: String) -> String? {
-        let patterns: [(String, Double)] = [
-            ("70B", 70), ("65B", 65), ("40B", 40), ("34B", 34), ("30B", 30),
-            ("22B", 22), ("13B", 13), ("12B", 12), ("11B", 11), ("8B", 8),
-            ("7B", 7), ("4B", 4), ("3B", 3), ("2B", 2), ("1.5B", 1.5), ("1B", 1)
-        ]
-        for (pattern, _) in patterns {
-            if modelId.contains(pattern) {
-                return pattern
+        
+        var models: [ModelInfo] = []
+        
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        
+        for itemURL in contents {
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: itemURL.path, isDirectory: &isDir)
+            
+            if isDir.boolValue && isModelDirectory(itemURL) {
+                let modelInfo = extractModelInfo(from: itemURL)
+                models.append(modelInfo)
             }
         }
-        return nil
+        
+        return models
     }
     
-    private func extractQuant(from modelId: String) -> String? {
-        if modelId.contains("4bit") { return "4-bit" }
-        if modelId.contains("8bit") { return "8-bit" }
-        return nil
+    private func isModelDirectory(_ url: URL) -> Bool {
+        // MLX models typically have config.json and model files
+        let configURL = url.appendingPathComponent("config.json")
+        let hasConfig = FileManager.default.fileExists(atPath: configURL.path)
+        
+        // Check for common MLX model files
+        let modelExtensions = ["safetensors", "bin", "mlpack", "mlir"]
+        let hasModelFile = modelExtensions.contains { ext in
+            let modelURL = url.appendingPathComponent("model.\(ext)")
+            return FileManager.default.fileExists(atPath: modelURL.path)
+        }
+        
+        return hasConfig || hasModelFile
+    }
+    
+    private func extractModelInfo(from url: URL) -> ModelInfo {
+        let name = url.lastPathComponent
+        let path = url.path
+        
+        // Calculate total size
+        var totalSize: Int64 = 0
+        if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
+            while let fileURL = enumerator.nextObject() as? URL {
+                if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                    totalSize += Int64(size)
+                }
+            }
+        }
+        
+        // Parse config.json for metadata
+        var parameterCount: String? = nil
+        var quantization: String? = nil
+        
+        let configURL = url.appendingPathComponent("config.json")
+        if let configData = FileManager.default.contents(atPath: configURL.path),
+           let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] {
+            
+            if let hiddenSize = config["hidden_size"] as? Int,
+               let numLayers = config["num_hidden_layers"] as? Int {
+                let approx = Double(hiddenSize * hiddenSize * numLayers * 12) / 1e9
+                parameterCount = approx > 1 ? String(format: "%.0fB", approx) : String(format: "%.0fM", approx * 1000)
+            }
+            
+            if let quantConfig = config["quantization_config"] as? [String: Any],
+               let bits = quantConfig["bits"] as? Int {
+                quantization = "\(bits)-bit"
+            }
+        }
+        
+        return ModelInfo(
+            id: name,
+            name: name,
+            path: path,
+            size: totalSize,
+            parameterCount: parameterCount,
+            quantization: quantization,
+            isRemote: false
+        )
+    }
+    
+    /// List available local models (returns empty - use scanDirectory)
+    func listModels() async -> [ModelInfo] {
+        return []
     }
     
     // MARK: - Model Loading
     
-    /// Load model from HuggingFace Hub (requires network)
-    func loadModel(id: String) async throws -> Bool {
-        if loadedModels[id] != nil {
-            return true // Already loaded
-        }
-        
-        do {
-            print("[MLXBackend] Loading model: \(id)")
-            
-            // Create HuggingFace downloader
-            let downloader = HFDownloader(token: hfToken)
-            
-            let container = try await loadModelContainer(
-                from: downloader,
-                using: TokenizersLoader(),
-                id: id
-            )
-            
-            loadedModels[id] = container
-            loadedModelIds.append(id)
-            
-            print("[MLXBackend] Successfully loaded model: \(id)")
-            return true
-        } catch {
-            print("[MLXBackend] Failed to load model \(id): \(error)")
-            throw MLXError.loadFailed(error.localizedDescription)
-        }
-    }
-    
     /// Load model from local directory
-    func loadLocalModel(path: String) async throws -> Bool {
+    func loadModel(path: String) async throws -> Bool {
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw MLXError.modelNotFound
         }
         
+        guard isModelDirectory(url) else {
+            throw MLXError.loadFailed("Not a valid MLX model directory")
+        }
+        
         do {
+            print("[MLXBackend] Loading model from: \(path)")
+            
             let container = try await loadModelContainer(
                 from: url,
                 using: TokenizersLoader()
             )
             
-            let modelId = url.lastPathComponent
-            loadedModels[modelId] = container
-            loadedModelIds.append(modelId)
+            loadedModel = container
+            loadedModelId = url.lastPathComponent
             
-            print("[MLXBackend] Loaded local model: \(modelId)")
+            print("[MLXBackend] Successfully loaded: \(loadedModelId ?? "")")
             return true
         } catch {
+            print("[MLXBackend] Failed to load model: \(error)")
             throw MLXError.loadFailed(error.localizedDescription)
         }
     }
     
+    /// Load model by ID (scans default directories)
+    func loadModel(id: String) async throws -> Bool {
+        // For local-only, ID is the path
+        return try await loadModel(path: id)
+    }
+    
     func unloadModel(id: String) -> Bool {
-        loadedModels.removeValue(forKey: id)
-        loadedModelIds.removeAll { $0 == id }
-        print("[MLXBackend] Unloaded model: \(id)")
-        return true
+        if loadedModelId == id || loadedModelId == nil {
+            loadedModel = nil
+            loadedModelId = nil
+            print("[MLXBackend] Model unloaded")
+            return true
+        }
+        return false
     }
     
     func isModelLoaded(_ id: String) -> Bool {
-        return loadedModels[id] != nil
+        return loadedModel != nil && loadedModelId == id
     }
     
     func getLoadedModelId() -> String? {
-        return loadedModelIds.first
+        return loadedModelId
     }
     
     // MARK: - Generation
@@ -155,7 +172,7 @@ actor MLXBackend {
         maxTokens: Int = 512,
         repetitionPenalty: Double = 1.0
     ) async throws -> GenerationResult {
-        guard let container = loadedModels[modelId] else {
+        guard let container = loadedModel else {
             throw MLXError.modelNotLoaded
         }
         
@@ -165,11 +182,11 @@ actor MLXBackend {
         
         var outputIds: [Int] = []
         
-        await container.model.perform { model in
+        try await container.model.perform { model in
             var token = inputIds
             for _ in 0..<maxTokens {
                 let logits = model(token)
-                let nextToken = sampleToken(logits: logits, temperature: Float(temperature))
+                let nextToken = self.sampleToken(logits: logits, temperature: Float(temperature))
                 
                 if nextToken == container.tokenizer.eosTokenId {
                     break
@@ -198,12 +215,11 @@ actor MLXBackend {
         modelId: String,
         messages: [ChatMessage],
         temperature: Double = 0.7,
-        maxTokens: Int = 512,
-        repetitionPenalty: Double = 1.0
+        maxTokens: Int = 512
     ) -> AsyncThrowingStream<StreamChunk, Error> {
         AsyncThrowingStream { continuation in
             Task {
-                guard let container = self.loadedModels[modelId] else {
+                guard let container = self.loadedModel else {
                     continuation.finish(throwing: MLXError.modelNotLoaded)
                     return
                 }
@@ -212,28 +228,33 @@ actor MLXBackend {
                 let inputIds = container.tokenizer.encode(prompt)
                 var outputIds: [Int] = []
                 
-                await container.model.perform { model in
-                    var token = inputIds
-                    for _ in 0..<maxTokens {
-                        let logits = model(token)
-                        let nextToken = self.sampleToken(logits: logits, temperature: Float(temperature))
-                        
-                        if nextToken == container.tokenizer.eosTokenId {
-                            break
+                do {
+                    try await container.model.perform { model in
+                        var token = inputIds
+                        for _ in 0..<maxTokens {
+                            let logits = model(token)
+                            let nextToken = self.sampleToken(logits: logits, temperature: Float(temperature))
+                            
+                            if nextToken == container.tokenizer.eosTokenId {
+                                break
+                            }
+                            
+                            outputIds.append(nextToken)
+                            token = [nextToken]
+                            
+                            let text = container.tokenizer.decode([nextToken])
+                            let chunk = StreamChunk(
+                                token: text,
+                                tokenId: nextToken,
+                                logprob: nil,
+                                finishReason: nil
+                            )
+                            continuation.yield(chunk)
                         }
-                        
-                        outputIds.append(nextToken)
-                        token = [nextToken]
-                        
-                        let text = container.tokenizer.decode([nextToken])
-                        let chunk = StreamChunk(
-                            token: text,
-                            tokenId: nextToken,
-                            logprob: nil,
-                            finishReason: nil
-                        )
-                        continuation.yield(chunk)
                     }
+                } catch {
+                    continuation.finish(throwing: error)
+                    return
                 }
                 
                 continuation.finish()
@@ -268,43 +289,6 @@ actor MLXBackend {
         
         let probs = softmax(logits, axis: -1)
         return Int.argmax(probs).item(Int.self)
-    }
-}
-
-// MARK: - HuggingFace Downloader
-
-/// Simple HuggingFace Hub downloader for MLX models
-struct HFDownloader: Downloader {
-    let token: String?
-    
-    func download(
-        id: String,
-        revision: String?,
-        matching patterns: [String],
-        useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
-    ) async throws -> URL {
-        // Check cache first
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        let modelDir = cacheDir.appendingPathComponent("models/\(id)")
-        
-        if FileManager.default.fileExists(atPath: modelDir.path) {
-            print("[HFDownloader] Using cached model: \(id)")
-            return modelDir
-        }
-        
-        // Download from HuggingFace Hub
-        print("[HFDownloader] Downloading model: \(id)")
-        
-        // Construct API URL
-        let revisionPart = revision != nil ? "/\(revision!)" : ""
-        let apiUrl = "https://huggingface.co/api/models/\(id)\(revisionPart)"
-        
-        // Download model files
-        let fileListUrl = "https://huggingface.co/\(id)/raw/main/.gitattributes"
-        
-        // For now, throw error - actual download implementation needed
-        throw MLXError.loadFailed("HuggingFace download not implemented - use local models for now")
     }
 }
 
@@ -349,8 +333,6 @@ struct GenerationResult: Codable {
     enum FinishReason: String, Codable {
         case stop
         case length
-        case contentFilter = "content_filter"
-        case modelSupport = "model_support"
     }
 }
 
@@ -372,46 +354,11 @@ enum MLXError: LocalizedError, Sendable {
     
     var errorDescription: String? {
         switch self {
-        case .modelNotLoaded:
-            return "Model is not loaded. Please load a model first."
-        case .loadFailed(let reason):
-            return "Failed to load model: \(reason)"
-        case .generationFailed(let reason):
-            return "Generation failed: \(reason)"
-        case .modelNotFound:
-            return "Model not found"
-        case .invalidRequest(let reason):
-            return "Invalid request: \(reason)"
+        case .modelNotLoaded: return "Model is not loaded"
+        case .loadFailed(let r): return "Load failed: \(r)"
+        case .generationFailed(let r): return "Generation failed: \(r)"
+        case .modelNotFound: return "Model not found"
+        case .invalidRequest(let r): return "Invalid request: \(r)"
         }
-    }
-}
-
-// MARK: - Generate Parameters
-
-public struct GenerateParameters: Sendable {
-    public var temperature: Float
-    public var topP: Float
-    public var topK: Int
-    public var minP: Float
-    public var maxTokens: Int
-    public var repetitionPenalty: Float
-    public var repetitionContextSize: Int
-    
-    public init(
-        temperature: Float = 0.7,
-        topP: Float = 0.9,
-        topK: Int = 50,
-        minP: Float = 0.0,
-        maxTokens: Int = 512,
-        repetitionPenalty: Float = 1.0,
-        repetitionContextSize: Int = 20
-    ) {
-        self.temperature = temperature
-        self.topP = topP
-        self.topK = topK
-        self.minP = minP
-        self.maxTokens = maxTokens
-        self.repetitionPenalty = repetitionPenalty
-        self.repetitionContextSize = repetitionContextSize
     }
 }
