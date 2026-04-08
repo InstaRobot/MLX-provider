@@ -24,13 +24,16 @@ settings:
 packages:
   MLX:
     url: https://github.com/ml-explore/mlx-swift
-    from: "0.8.0"
+    exactVersion: "0.31.3"
   MLXLM:
     url: https://github.com/ml-explore/mlx-swift-lm
-    from: "0.8.0"
+    exactVersion: "0.12.1"
   swift-nio:
     url: https://github.com/apple/swift-nio
-    from: "2.80.0"
+    exactVersion: "2.97.1"
+  swift-async-algorithms:
+    url: https://github.com/apple/swift-async-algorithms
+    exactVersion: "1.1.3"
 
 targets:
   MLX-provider:
@@ -40,6 +43,7 @@ targets:
       - path: Sources
         excludes:
           - "**/.DS_Store"
+          - "**/Tests/**"
     dependencies:
       - package: MLX
         product: MLX
