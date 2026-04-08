@@ -27,13 +27,16 @@ packages:
     exactVersion: "0.31.3"
   MLXLM:
     url: https://github.com/ml-explore/mlx-swift-lm
-    exactVersion: "0.12.1"
+    branch: "main"
+  swift-tokenizers-mlx:
+    url: https://github.com/DePasqualeOrg/swift-tokenizers-mlx
+    from: "0.1.0"
+  swift-hf-api-mlx:
+    url: https://github.com/DePasqualeOrg/swift-hf-api-mlx
+    from: "0.1.0"
   swift-nio:
     url: https://github.com/apple/swift-nio
     exactVersion: "2.97.1"
-  swift-async-algorithms:
-    url: https://github.com/apple/swift-async-algorithms
-    exactVersion: "1.1.3"
 
 targets:
   MLX-provider:
@@ -50,9 +53,11 @@ targets:
       - package: MLXLM
         product: MLXLLM
       - package: MLXLM
-        product: MLXLMHuggingFace
-      - package: MLXLM
+        product: MLXLMCommon
+      - package: swift-tokenizers-mlx
         product: MLXLMTokenizers
+      - package: swift-hf-api-mlx
+        product: MLXLMHFAPI
       - package: swift-nio
         product: NIO
       - package: swift-nio
