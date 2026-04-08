@@ -6,6 +6,7 @@ options:
   xcodeVersion: "16.0"
   createIntermediateGroups: true
   generateEmptyDirectories: true
+  defaultConfig: Debug
 
 settings:
   base:
@@ -18,6 +19,18 @@ settings:
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
     INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2024 InstaRobot. All rights reserved."
     INFOPLIST_KEY_CFBundleDisplayName: "MLX Provider"
+    SWIFT_STRICT_CONCURRENCY: complete
+
+packages:
+  MLX:
+    url: https://github.com/ml-explore/mlx-swift
+    from: "0.8.0"
+  MLXLM:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    from: "0.8.0"
+  swift-nio:
+    url: https://github.com/apple/swift-nio
+    from: "2.80.0"
 
 targets:
   MLX-provider:
@@ -25,6 +38,21 @@ targets:
     platform: macOS
     sources:
       - path: Sources
+        excludes:
+          - "**/.DS_Store"
+    dependencies:
+      - package: MLX
+        product: MLX
+      - package: MLXLM
+        product: MLXLLM
+      - package: MLXLM
+        product: MLXLMHuggingFace
+      - package: MLXLM
+        product: MLXLMTokenizers
+      - package: swift-nio
+        product: NIO
+      - package: swift-nio
+        product: NIOHTTP1
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.instarobot.MLX-provider
@@ -33,6 +61,7 @@ targets:
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         SWIFT_EMIT_LOC_STRINGS: YES
         ENABLE_PREVIEWS: YES
+        OTHER_LDFLAGS: "-Wl,-no_warn_duplicate_libraries"
     info:
       path: Sources/Resources/Info.plist
       properties:
@@ -49,3 +78,19 @@ targets:
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
         LSUIElement: false
+
+schemes:
+  MLX-provider:
+    build:
+      targets:
+        MLX-provider: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
