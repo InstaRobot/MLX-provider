@@ -28,11 +28,8 @@ packages:
   MLXLM:
     url: https://github.com/ml-explore/mlx-swift-lm
     branch: "main"
-  swift-tokenizers-mlx:
-    url: https://github.com/DePasqualeOrg/swift-tokenizers-mlx
-    branch: "main"
-  swift-hf-api-mlx:
-    url: https://github.com/DePasqualeOrg/swift-hf-api-mlx
+  swift-tokenizers:
+    url: https://github.com/DePasqualeOrg/swift-tokenizers
     branch: "main"
   swift-nio:
     url: https://github.com/apple/swift-nio
@@ -54,10 +51,8 @@ targets:
         product: MLXLLM
       - package: MLXLM
         product: MLXLMCommon
-      - package: swift-tokenizers-mlx
-        product: MLXLMTokenizers
-      - package: swift-hf-api-mlx
-        product: MLXLMHFAPI
+      - package: swift-tokenizers
+        product: Tokenizers
       - package: swift-nio
         product: NIO
       - package: swift-nio
