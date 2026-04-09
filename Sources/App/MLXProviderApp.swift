@@ -1,22 +1,16 @@
+import Foundation
 import SwiftUI
 
 @main
 struct MLXProviderApp: App {
     @StateObject private var appState = AppState()
-    
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
         }
         .windowStyle(.titleBar)
-        .windowToolbar {
-            ToolbarItem(placement: .automatic) {
-                Button(action: { appState.showSettings.toggle() }) {
-                    Image(systemName: "gear")
-                }
-            }
-        }
     }
 }
 
@@ -27,67 +21,108 @@ final class AppState: ObservableObject {
     @Published var config = AppConfig()
     @Published var serverStatus: ServerStatus = .stopped
     @Published var models: [ModelInfo] = []
+    @Published var selectedModelId: String?
     @Published var loadedModel: String?
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var showSettings = false
-    
+    @Published var showAbout = false
+    @Published var startupProgress: StartupProgress?
+
     private let configStore = ConfigStore()
-    private let modelService: ModelService
-    private let apiService: APIService
-    
+    private let mlxManager = MLXModelManager()
+
     init() {
-        self.modelService = ModelService()
-        self.apiService = APIService()
         loadConfig()
         scanModels()
     }
-    
+
     func loadConfig() {
         config = configStore.load()
     }
-    
+
     func saveConfig() {
         configStore.save(config)
     }
-    
+
     func scanModels() {
         isLoading = true
-        Task {
-            do {
-                models = try await modelService.scanDirectory(config.modelDirectory)
-                isLoading = false
-            } catch {
-                errorMessage = error.localizedDescription
-                isLoading = false
-            }
-        }
-    }
-    
-    func startServer() async {
-        serverStatus = .starting
+        let scanner = DirectoryScanner()
+        let url = URL(fileURLWithPath: (config.modelDirectory as NSString).expandingTildeInPath)
         do {
-            try await apiService.start(
-                port: config.apiPort,
-                modelService: modelService
-            )
-            serverStatus = .running
+            models = try scanner.scanForModels(at: url)
+            isLoading = false
         } catch {
             errorMessage = error.localizedDescription
-            serverStatus = .stopped
+            isLoading = false
         }
     }
-    
+
+    func startServer() async {
+        guard let modelId = selectedModelId,
+              let modelInfo = models.first(where: { $0.id == modelId }) else {
+            errorMessage = "Please select a model first"
+            LogManager.shared.error("Failed to start server: No model selected")
+            return
+        }
+
+        serverStatus = .starting
+        LogManager.shared.info("Starting server...")
+        startupProgress = StartupProgress(step: .checkingEnvironment, progress: 0, message: "Loading model...")
+
+        do {
+            startupProgress = StartupProgress(step: .startingServer, progress: 0.5, message: "Loading \(modelInfo.name)...")
+            try await mlxManager.loadModel(modelInfo: modelInfo)
+
+            startupProgress = nil
+            loadedModel = modelId
+            serverStatus = .running
+            LogManager.shared.info("Server started successfully")
+        } catch {
+            startupProgress = nil
+            errorMessage = error.localizedDescription
+            serverStatus = .stopped
+            LogManager.shared.error("Server failed to start: \(error.localizedDescription)")
+        }
+    }
+
     func stopServer() async {
-        await apiService.stop()
+        LogManager.shared.info("Stopping server...")
+        mlxManager.unloadModel()
+        loadedModel = nil
         serverStatus = .stopped
+        LogManager.shared.info("Server stopped")
+    }
+
+    func loadModel(_ modelId: String) async {
+        selectedModelId = modelId
+    }
+
+    func unloadModel(_ modelId: String) async {
+        selectedModelId = nil
+    }
+
+    func generate(
+        messages: [ChatMessage],
+        temperature: Double? = nil,
+        maxTokens: Int? = nil
+    ) async throws -> GenerationResult {
+        return try await mlxManager.generate(messages: messages)
+    }
+
+    func generateStream(
+        messages: [ChatMessage],
+        temperature: Double? = nil,
+        maxTokens: Int? = nil
+    ) -> AsyncThrowingStream<StreamChunk, Error> {
+        return mlxManager.generateStream(messages: messages)
     }
 }
 
 // MARK: - AppConfig
 
 struct AppConfig: Codable {
-    var modelDirectory: String = "~/Models/mlx"._NSURL.pathString
+    var modelDirectory: String = NSString(string: "~/Models/mlx").expandingTildeInPath
     var apiPort: Int = 8080
     var apiKey: String? = nil
     var defaultModel: String? = nil
@@ -102,7 +137,7 @@ enum ServerStatus: Equatable {
     case starting
     case running
     case error(String)
-    
+
     var displayName: String {
         switch self {
         case .stopped: return "Stopped"
@@ -111,7 +146,7 @@ enum ServerStatus: Equatable {
         case .error(let msg): return "Error: \(msg)"
         }
     }
-    
+
     var color: Color {
         switch self {
         case .stopped: return .gray
@@ -122,22 +157,26 @@ enum ServerStatus: Equatable {
     }
 }
 
-// MARK: - ModelInfo
+// MARK: - Startup Progress
 
-struct ModelInfo: Identifiable, Codable, Hashable {
-    let id: String
-    let name: String
-    let path: String
-    let size: Int64
-    let parameterCount: String?
-    let quantization: String?
-    
-    init(id: String, name: String, path: String, size: Int64, parameterCount: String? = nil, quantization: String? = nil) {
-        self.id = id
-        self.name = name
-        self.path = path
-        self.size = size
-        self.parameterCount = parameterCount
-        self.quantization = quantization
+enum StartupStep: String {
+    case checkingEnvironment = "Checking environment"
+    case creatingVirtualEnvironment = "Creating Python virtual environment"
+    case installingDependencies = "Installing MLX dependencies"
+    case startingServer = "Starting server"
+
+    var icon: String {
+        switch self {
+        case .checkingEnvironment: return "magnifyingglass"
+        case .creatingVirtualEnvironment: return "folder.badge.gearshape"
+        case .installingDependencies: return "arrow.down.circle"
+        case .startingServer: return "server.rack"
+        }
     }
+}
+
+struct StartupProgress {
+    let step: StartupStep
+    let progress: Double
+    let message: String
 }

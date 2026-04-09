@@ -2,30 +2,43 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
-    @State private var selectedModel: String?
-    
+    @State private var selectedContentTab = 0
+
     var body: some View {
         HSplitView {
             // MARK: - Left Sidebar - Model List
-            ModelListSidebar(selectedModel: $selectedModel)
+            ModelListSidebar()
                 .frame(minWidth: 280, idealWidth: 320, maxWidth: 400)
-            
+
             // MARK: - Right Content - Server Control & Logs
             VStack(spacing: 0) {
                 // Server Control Panel
                 ServerControlPanel()
-                
+
                 Divider()
-                
+
                 // Main Content Area
                 if appState.serverStatus == .running {
-                    ServerInfoPanel()
+                    // Tab selector
+                    Picker("", selection: $selectedContentTab) {
+                        Text("Server Info").tag(0)
+                        Text("Test Chat").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
+                    if selectedContentTab == 0 {
+                        ServerInfoPanel()
+                    } else {
+                        TestChatPanel()
+                    }
                 } else {
                     WelcomePanel()
                 }
-                
+
                 Spacer()
-                
+
                 // Status Bar
                 StatusBar()
             }
@@ -37,7 +50,7 @@ struct ContentView: View {
                     Image(systemName: "gear")
                 }
                 .help("Settings")
-                
+
                 Button(action: { appState.showAbout.toggle() }) {
                     Image(systemName: "info.circle")
                 }
@@ -51,6 +64,127 @@ struct ContentView: View {
         .sheet(isPresented: $appState.showAbout) {
             AboutView()
         }
+        .overlay {
+            if let progress = appState.startupProgress {
+                StartupProgressOverlay(progress: progress)
+            }
+        }
+    }
+}
+
+// MARK: - Startup Progress Overlay
+
+struct StartupProgressOverlay: View {
+    let progress: StartupProgress
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+
+            VStack(spacing: 24) {
+                Image(systemName: "cpu.fill")
+                    .font(.system(size: 48))
+                    .foregroundColor(.accentColor)
+
+                Text("MLX-provider")
+                    .font(.title)
+                    .fontWeight(.bold)
+
+                VStack(alignment: .leading, spacing: 16) {
+                    ProgressStepRow(
+                        step: StartupStep.checkingEnvironment,
+                        isActive: progress.step == .checkingEnvironment,
+                        isCompleted: stepOrder(progress.step) > stepOrder(.checkingEnvironment)
+                    )
+
+                    ProgressStepRow(
+                        step: StartupStep.creatingVirtualEnvironment,
+                        isActive: progress.step == .creatingVirtualEnvironment,
+                        isCompleted: stepOrder(progress.step) > stepOrder(.creatingVirtualEnvironment)
+                    )
+
+                    ProgressStepRow(
+                        step: StartupStep.installingDependencies,
+                        isActive: progress.step == .installingDependencies,
+                        isCompleted: stepOrder(progress.step) > stepOrder(.installingDependencies)
+                    )
+
+                    ProgressStepRow(
+                        step: StartupStep.startingServer,
+                        isActive: progress.step == .startingServer,
+                        isCompleted: stepOrder(progress.step) > stepOrder(.startingServer)
+                    )
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+
+                Text(progress.message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(40)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .cornerRadius(16)
+            .shadow(radius: 20)
+        }
+    }
+
+    private func stepOrder(_ step: StartupStep) -> Int {
+        switch step {
+        case .checkingEnvironment: return 0
+        case .creatingVirtualEnvironment: return 1
+        case .installingDependencies: return 2
+        case .startingServer: return 3
+        }
+    }
+}
+
+struct ProgressStepRow: View {
+    let step: StartupStep
+    let isActive: Bool
+    let isCompleted: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(backgroundColor)
+                    .frame(width: 28, height: 28)
+
+                if isCompleted {
+                    Image(systemName: "checkmark")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+                } else if isActive {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .tint(.white)
+                } else {
+                    Image(systemName: step.icon)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Text(step.rawValue)
+                .font(.body)
+                .foregroundColor(isActive ? .primary : (isCompleted ? .primary : .secondary))
+
+            Spacer()
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isCompleted {
+            return .green
+        } else if isActive {
+            return .accentColor
+        } else {
+            return Color(nsColor: .controlBackgroundColor)
+        }
     }
 }
 
@@ -58,8 +192,7 @@ struct ContentView: View {
 
 struct ModelListSidebar: View {
     @EnvironmentObject var appState: AppState
-    @Binding var selectedModel: String?
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -90,11 +223,11 @@ struct ModelListSidebar: View {
                         ForEach(appState.models) { model in
                             ModelRowView(
                                 model: model,
-                                isSelected: selectedModel == model.id,
+                                isSelected: appState.selectedModelId == model.id,
                                 isLoaded: appState.loadedModel == model.id
                             )
                             .onTapGesture {
-                                selectedModel = model.id
+                                appState.selectedModelId = model.id
                             }
                         }
                     }
@@ -130,10 +263,11 @@ struct EmptyModelView: View {
 // MARK: - Model Row
 
 struct ModelRowView: View {
+    @EnvironmentObject var appState: AppState
     let model: ModelInfo
     let isSelected: Bool
     let isLoaded: Bool
-    
+
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -141,38 +275,33 @@ struct ModelRowView: View {
                     Text(model.name)
                         .fontWeight(isLoaded ? .semibold : .regular)
                         .lineLimit(1)
-                    
-                    if isLoaded {
-                        LoadedBadge()
+
+                    if isSelected {
+                        SelectedBadge()
                     }
                 }
-                
+
                 HStack(spacing: 12) {
                     if let params = model.parameterCount {
                         Label(params, systemImage: "number")
                             .font(.caption2)
                     }
-                    
+
                     if let quant = model.quantization {
                         Label(quant, systemImage: "chart.bar.fill")
                             .font(.caption2)
                     }
-                    
+
                     if model.size > 0 {
-                        Text(model.formattedSize)
+                        Text(formatSize(model.size))
                             .font(.caption2)
                     }
                 }
                 .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
-            if model.isRemote {
-                Image(systemName: "cloud.fill")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -184,17 +313,17 @@ struct ModelRowView: View {
     }
 }
 
-// MARK: - Loaded Badge
+// MARK: - Selected Badge
 
-struct LoadedBadge: View {
+struct SelectedBadge: View {
     var body: some View {
-        Text("LOADED")
+        Text("SELECTED")
             .font(.caption2)
             .fontWeight(.medium)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(Color.green.opacity(0.2))
-            .foregroundColor(.green)
+            .background(Color.accentColor.opacity(0.2))
+            .foregroundColor(.accentColor)
             .cornerRadius(4)
     }
 }
@@ -282,7 +411,7 @@ struct ServerInfoPanel: View {
             }
             
             // Log Viewer
-            LogView()
+            ActivityLogView()
         }
         .padding()
     }
@@ -362,9 +491,223 @@ struct StatusBar: View {
     }
 }
 
+// MARK: - Test Chat Panel
+
+struct TestChatPanel: View {
+    @EnvironmentObject var appState: AppState
+    @State private var inputText = ""
+    @State private var messages: [UIChatMessage] = []
+    @State private var isGenerating = false
+    @State private var currentResponse = ""
+    @State private var errorMessage: String?
+
+    private var selectedModelInfo: ModelInfo? {
+        guard let modelId = appState.selectedModelId else { return nil }
+        return appState.models.first(where: { $0.id == modelId })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Model Status Card
+            modelStatusCard
+
+            // Chat Area
+            chatArea
+
+            // Input Area
+            inputArea
+        }
+        .padding()
+    }
+
+    private var modelStatusCard: some View {
+        GroupBox("Model Status") {
+            VStack(alignment: .leading, spacing: 8) {
+                if let model = selectedModelInfo {
+                    HStack {
+                        Circle()
+                            .fill(appState.selectedModelId != nil ? Color.accentColor : Color.gray)
+                            .frame(width: 10, height: 10)
+                        Text(appState.selectedModelId != nil ? "SELECTED" : "NOT SELECTED")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(appState.selectedModelId != nil ? .accentColor : .gray)
+                        Spacer()
+                    }
+
+                    Text(model.name)
+                        .font(.headline)
+
+                    HStack(spacing: 16) {
+                        if let params = model.parameterCount {
+                            Label(params, systemImage: "number")
+                                .font(.caption)
+                        }
+                        if let quant = model.quantization {
+                            Label(quant, systemImage: "chart.bar.fill")
+                                .font(.caption)
+                        }
+                        Text(formatSize(model.size))
+                            .font(.caption)
+                    }
+                    .foregroundColor(.secondary)
+
+                    if let contextWindow = model.contextWindow {
+                        Text("Context: \(formatTokens(contextWindow)) tokens")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    HStack {
+                        Circle()
+                            .fill(Color.gray)
+                            .frame(width: 10, height: 10)
+                        Text("NO MODEL LOADED")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.gray)
+                    }
+                    Text("Select a model to test")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var chatArea: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(messages) { message in
+                        chatBubble(message)
+                    }
+                    if isGenerating && !currentResponse.isEmpty {
+                        chatBubble(UIChatMessage(id: UUID().uuidString, role: .assistant, content: currentResponse))
+                    }
+                }
+                .padding()
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .cornerRadius(8)
+            .onChange(of: messages.count) { _, _ in
+                if let last = messages.last {
+                    withAnimation {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+        }
+    }
+
+    private func chatBubble(_ message: UIChatMessage) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            if message.role == .assistant {
+                Image(systemName: "apple.logo")
+                    .font(.caption)
+                    .foregroundColor(.accentColor)
+            } else {
+                Image(systemName: "person.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Text(message.content)
+                .font(.body)
+        }
+        .id(message.id)
+    }
+
+    private var inputArea: some View {
+        HStack {
+            TextField("Type a message...", text: $inputText, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...3)
+                .frame(minHeight: 30)
+                .onSubmit {
+                    sendMessage()
+                }
+
+            Button(action: sendMessage) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.title2)
+            }
+            .buttonStyle(.plain)
+            .disabled(inputText.isEmpty || isGenerating || appState.selectedModelId == nil)
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private func sendMessage() {
+        guard !inputText.isEmpty else { return }
+
+        let userMessage = UIChatMessage(id: UUID().uuidString, role: .user, content: inputText)
+        messages.append(userMessage)
+        inputText = ""
+        isGenerating = true
+        currentResponse = ""
+        errorMessage = nil
+
+        Task {
+            do {
+                let mlxMessages = [ChatMessage(role: .user, content: userMessage.content)]
+                let stream = appState.generateStream(messages: mlxMessages)
+
+                for try await chunk in stream {
+                    await MainActor.run {
+                        currentResponse += chunk.token
+                    }
+                }
+
+                await MainActor.run {
+                    if !currentResponse.isEmpty {
+                        messages.append(UIChatMessage(id: UUID().uuidString, role: .assistant, content: currentResponse))
+                    }
+                    currentResponse = ""
+                    isGenerating = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    isGenerating = false
+                }
+            }
+        }
+    }
+
+    private func formatTokens(_ count: Int) -> String {
+        if count >= 1000 {
+            return String(format: "%.0fK", Double(count) / 1000.0)
+        }
+        return "\(count)"
+    }
+}
+
+// MARK: - ChatMessage (UI version)
+
+struct UIChatMessage: Identifiable {
+    let id: String
+    let role: Role
+    let content: String
+
+    enum Role {
+        case user
+        case assistant
+    }
+}
+
 // MARK: - Preview
 
 #Preview {
     ContentView()
         .environmentObject(AppState())
+}
+
+// MARK: - Helper Functions
+
+private func formatSize(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: bytes)
 }

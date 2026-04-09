@@ -4,7 +4,15 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
-    
+
+    private var selectedModelContextWindow: Int? {
+        guard let defaultModelId = appState.config.defaultModel,
+              let model = appState.models.first(where: { $0.id == defaultModelId }) else {
+            return nil
+        }
+        return model.contextWindow
+    }
+
     var body: some View {
         TabView {
             // General Tab
@@ -57,8 +65,20 @@ struct SettingsView: View {
                     HStack {
                         Text("Max Tokens")
                         Spacer()
-                        TextField("", value: $appState.config.maxTokens, format: .number)
-                            .frame(width: 80)
+                        if let contextWindow = selectedModelContextWindow {
+                            Stepper(
+                                "\(appState.config.maxTokens)",
+                                value: $appState.config.maxTokens,
+                                in: 0...max(contextWindow, appState.config.maxTokens)
+                            )
+                            .frame(width: 100)
+                            Text("/ \(contextWindow)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            TextField("", value: $appState.config.maxTokens, format: .number)
+                                .frame(width: 80)
+                        }
                     }
                     
                     HStack {

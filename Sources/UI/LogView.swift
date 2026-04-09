@@ -1,9 +1,8 @@
 import SwiftUI
 
-struct LogView: View {
-    @State private var logs: [LogEntry] = []
+struct ActivityLogView: View {
     @State private var isAutoScroll = true
-    
+
     var body: some View {
         GroupBox("Activity Log") {
             VStack(spacing: 0) {
@@ -11,7 +10,7 @@ struct LogView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(logs) { entry in
+                            ForEach(LogManager.shared.entries) { entry in
                                 LogEntryView(entry: entry)
                                     .id(entry.id)
                             }
@@ -19,26 +18,26 @@ struct LogView: View {
                         .padding(8)
                     }
                     .background(Color(nsColor: .textBackgroundColor))
-                    .onChange(of: logs.count) { _, _ in
-                        if isAutoScroll, let lastId = logs.last?.id {
+                    .onChange(of: LogManager.shared.entries.count) { _, _ in
+                        if isAutoScroll, let lastId = LogManager.shared.entries.last?.id {
                             withAnimation {
                                 proxy.scrollTo(lastId, anchor: .bottom)
                             }
                         }
                     }
                 }
-                
+
                 Divider()
-                
+
                 // Controls
                 HStack {
                     Toggle("Auto-scroll", isOn: $isAutoScroll)
                         .toggleStyle(.checkbox)
                         .font(.caption)
-                    
+
                     Spacer()
-                    
-                    Button(action: clearLogs) {
+
+                    Button(action: { LogManager.shared.clear() }) {
                         Label("Clear", systemImage: "trash")
                             .font(.caption)
                     }
@@ -50,10 +49,6 @@ struct LogView: View {
             }
         }
         .frame(minHeight: 150, idealHeight: 200, maxHeight: 300)
-    }
-    
-    private func clearLogs() {
-        logs.removeAll()
     }
 }
 
@@ -155,7 +150,7 @@ final class LogManager: ObservableObject {
 // MARK: - Preview
 
 #Preview {
-    LogView()
+    ActivityLogView()
         .frame(height: 300)
         .padding()
 }

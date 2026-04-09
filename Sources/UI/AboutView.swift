@@ -56,13 +56,13 @@ struct AboutView: View {
                     .font(.headline)
                 
                 FlowLayout(spacing: 8) {
-                    ModelTag("Llama")
-                    ModelTag("Mistral")
-                    ModelTag("Qwen")
-                    ModelTag("Gemma")
-                    ModelTag("Phi")
-                    ModelTag("OpenELM")
-                    ModelTag("+1000 more")
+                    ModelTag(text: "Llama")
+                    ModelTag(text: "Mistral")
+                    ModelTag(text: "Qwen")
+                    ModelTag(text: "Gemma")
+                    ModelTag(text: "Phi")
+                    ModelTag(text: "OpenELM")
+                    ModelTag(text: "+1000 more")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
